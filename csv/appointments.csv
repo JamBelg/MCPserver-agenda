@@ -1,4 +1,4 @@
-id,patient_number,appointment_type,appointment_date,start_hour,end_hour
+id,patient_id,appointment_id,appointment_date,start_hour,end_hour
 0,P005,50,2025-09-29,13:30,13:45
 1,P064,200,2025-10-06,15:30,15:45
 2,P046,60,2025-09-11,12:00,13:00

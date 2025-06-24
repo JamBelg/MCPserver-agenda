@@ -1,4 +1,4 @@
-appointment_number,appointment_name,hourly_rate
+id,appointment_type,hourly_rate
 100,General Consultation,70
 75,Follow-up Visit,50
 120,Physical Exam,80

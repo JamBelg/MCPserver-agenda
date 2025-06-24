@@ -1,4 +1,4 @@
-patient_number,patient_name,patient_address,patient_phonenumber
+id,patient_name,patient_address,patient_phonenumber
 P001,Jeanette Fritz,"617 Beth Mountains, Elizabethshire, LA 58614",800.945.3014
 P002,Theodore Daniels,"0895 Donna Cliffs, New Renee, OH 05975",5949828667
 P003,Kirk Fox,"810 Johnston Islands Suite 556, West Janiceton, CT 36197",(728)612-3539x752

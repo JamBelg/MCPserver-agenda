@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import asyncpg
+import psycopg2
 from dotenv import load_dotenv
 import os
 import sys
@@ -17,28 +18,36 @@ logger = logging.getLogger("server_module")
 # Load environment variables from .env file
 load_dotenv()
 
-# PostgreSQL connection parameters from environment variables
-PG_HOST = os.getenv('PG_HOST', 'localhost')
-PG_PORT = int(os.getenv('PG_PORT', '5432'))
-PG_USER = os.getenv('PG_USER', 'postgres')
-PG_PASSWORD = os.getenv('PG_PASSWORD', '')
-PG_DATABASE = os.getenv('PG_DATABASE', 'postgres')
+# PostgreSQL connection parameters (Docker-friendly)
+# PG_HOST = os.getenv('PG_HOST', 'localhost')  # Use Docker service name if in same Docker network
+# PG_PORT = int(os.getenv('PG_PORT', 5432))
+# PG_USER = os.getenv('PG_USER', 'postgres')
+# PG_PASSWORD = os.getenv('PG_PASSWORD', 'postgres')  # Replace with your real password
+# PG_DATABASE = os.getenv('PG_DATABASE', 'MCP_agenda')
+
+# Database connection parameters
+# connection_params = {
+#     'host': os.getenv('PG_HOST', 'localhost'),  
+#     'port': int(os.getenv('PG_PORT', "5432")),
+#     'database': os.getenv('PG_DATABASE', 'MCP_agenda'),
+#     'user': os.getenv('PG_USER', 'postgres'),
+#     'password': os.getenv('PG_PASSWORD', 'postgres')
+# }
+connection_params = {
+        'host': 'localhost',
+        'port': 5432,
+        'database': 'MCP_agenda',
+        'user': 'postgres',
+        'password': 'postgres'
+    }
 
 @asynccontextmanager
-# Type-safe application lifespan context manager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     """Manage application lifecycle with type-safe context"""
     logger.debug("Initializing PostgreSQL database connection")
     conn = None
-    
     try:
-        conn = await asyncpg.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            user=PG_USER,
-            password=PG_PASSWORD,
-            database=PG_DATABASE
-        )
+        conn = await asyncpg.connect(**connection_params)
         logger.debug("PostgreSQL connection established successfully")
         yield {"conn": conn}
     except Exception as e:
@@ -55,81 +64,87 @@ mcp = FastMCP("appointments", lifespan=app_lifespan)
 
 # retrieve data and filter by date
 @mcp.tool()
-async def retrieve_data_date(ctx: Context,
-                             date_appointment_start: Optional[str] = None,
-                             date_appointment_end: Optional[str] = None,
-                             limit: Optional[str] = None) -> Union[Dict[str, Any], None]:
+async def retrieve_data_date(
+    ctx: Context,
+    date_appointment_start: Optional[str] = None,
+    date_appointment_end: Optional[str] = None,
+    limit: Optional[int] = None
+) -> Union[Dict[str, Any], None]:
     """
     Retrieve agenda data filtered by appointment date.
-    
+
     Args:
         date_appointment_start: First date of the appointment in YYYY-MM-DD format (column appointment_date in agenda table)
         date_appointment_end: Optional second date of the appointment in YYYY-MM-DD format (column appointment_date in agenda table)
-    
+        limit: Optional limit for number of rows
+
     Returns:
         Dictionary with appointments data, or None if error occurs
     """
     try:
         # Get connection from lifespan context
         conn = ctx.request_context.lifespan_context.get("conn")
-        
+
         if conn is None:
             logger.error("Database connection is not available")
             return None
 
-        # Parse and validate input dates
-        appointment_date_obj1 = datetime.strptime(date_appointment_start, "%Y-%m-%d").date()
-        if date_appointment_end:
-            appointment_date_obj2 = datetime.strptime(date_appointment_end, "%Y-%m-%d").date()
-        if limit:
-            limit = int(limit)
-
+        # Validate input
         if not date_appointment_start and not date_appointment_end:
             logger.error("At least one of date_appointment_start or date_appointment_end must be provided")
             return None
-        elif not date_appointment_end:
+
+        # Parse dates
+        if date_appointment_start:
+            appointment_date_obj1 = datetime.strptime(date_appointment_start, "%Y-%m-%d").date()
+        if date_appointment_end:
+            appointment_date_obj2 = datetime.strptime(date_appointment_end, "%Y-%m-%d").date()
+
+        # Build query and parameters
+        if not date_appointment_end:
             query = """
-            SELECT t2.name as patient_name,
-                t2.address,
-                t2.phonenumber,
+            SELECT t2.patient_name,
+                t2.patient_address,
+                t2.patient_phonenumber,
                 t1.appointment_date,
                 t1.start_hour,
                 t1.end_hour,
-                t3.name as type_appointment,
+                t3.appointment_type,
                 t3.hourly_rate
             FROM agenda as t1
-            LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-            LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
+            LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+            LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
             WHERE t1.appointment_date = $1
             """
+            params = [appointment_date_obj1]
             if limit:
                 query += " LIMIT $2"
-                rows = await conn.fetch(query, appointment_date_obj1, limit)
-            else:
-                rows = await conn.fetch(query, appointment_date_obj1)
+                params.append(limit)
+            rows = await conn.fetch(query, *params)
         else:
             query = """
-            SELECT t2.name as patient_name,
-                t2.address,
-                t2.phonenumber,
+            SELECT t2.patient_name,
+                t2.patient_address,
+                t2.patient_phonenumber,
                 t1.appointment_date,
                 t1.start_hour,
                 t1.end_hour,
-                t3.name as type_appointment,
+                t3.appointment_type,
                 t3.hourly_rate
             FROM agenda as t1
-            LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-            LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
-            WHERE t1.appointment_date >= $1 and t1.appointment_date <= $2 order by t1.appointment_date
+            LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+            LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
+            WHERE t1.appointment_date >= $1 AND t1.appointment_date <= $2
+            ORDER BY t1.appointment_date
             """
+            params = [appointment_date_obj1, appointment_date_obj2]
             if limit:
                 query += " LIMIT $3"
-                rows = await conn.fetch(query, appointment_date_obj1, appointment_date_obj2, limit)
-            else:
-                rows = await conn.fetch(query, appointment_date_obj1, appointment_date_obj2)
-        
+                params.append(limit)
+            rows = await conn.fetch(query, *params)
+
         appointments = [dict(row) for row in rows]
-        
+
         result = {
             "status": "success",
             "count": len(appointments),
@@ -137,10 +152,10 @@ async def retrieve_data_date(ctx: Context,
             "date_end": date_appointment_end if date_appointment_end else date_appointment_start,
             "appointments": appointments
         }
-        
+
         logger.info(f"Successfully retrieved {len(appointments)} rows for selected dates")
         return result
-            
+
     except asyncpg.PostgresError as e:
         logger.error(f"PostgreSQL error: {e}")
         return None
@@ -149,185 +164,199 @@ async def retrieve_data_date(ctx: Context,
         return None
 
 
+
 # retrieve data and filter by patient
 @mcp.tool()
-async def retrieve_data_patient(ctx: Context,
-                                patient_name: Optional[str] = None,
-                                patient_number: Optional[str] = None) -> Union[Dict[str, Any], None]:
+async def retrieve_data_patient(
+    ctx: Context,
+    patient_name: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    limit: Optional[int] = None
+) -> Union[Dict[str, Any], None]:
     """
     Retrieve agenda data filtered by patient.
-    
+
     Args:
         patient_name: Name of the patient (column name in patients table)
-        patient_number: Patient number (column patient_number in patients table and agenda table)
-    
-    Returns:
-        List of dictionaries representing rows, or None if error occurs
-    """
-    if not patient_name and not patient_number:
-        logger.error("At least one of patient_name or patient_number must be provided")
-        return None
-    else:
-        try:
-            # Get connection from lifespan context
-            conn = ctx.request_context.lifespan_context.get("conn")
-            
-            if conn is None:
-                logger.error("Database connection is not available")
-                return None
+        patient_id: Patient ID (column patient_id in patients table and agenda table)
+        limit: Optional limit for number of rows
 
-            if patient_number:
-                query = """
-                SELECT t2.name as patient_name,
-                    t2.address,
-                    t2.phonenumber,
-                    t1.appointment_date,
-                    t1.start_hour,
-                    t1.end_hour,
-                    t3.name as type_appointment,
-                    t3.hourly_rate
-                FROM agenda as t1
-                LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-                LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
-                WHERE t1.patient_number = $1
-                """
-                
-                rows = await conn.fetch(query, patient_number)
-            else:
-                query = """
-                SELECT t2.name as patient_name,
-                    t2.address,
-                    t2.phonenumber,
-                    t1.appointment_date,
-                    t1.start_hour,
-                    t1.end_hour,
-                    t3.name as type_appointment,
-                    t3.hourly_rate
-                FROM agenda as t1
-                LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-                LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
-                WHERE t2.name ILIKE $1
-                """
-                
-                rows = await conn.fetch(query, patient_name)
-            
-            appointments = [dict(row) for row in rows]
-        
-            result = {
-                "status": "success",
-                "count": len(appointments),
-                "patient_name": patient_name,
-                "patient_number": patient_number,
-                "appointments": appointments
-            }
-            
-            if patient_number:
-                logger.info(f"Successfully retrieved {len(result)} rows for patient number {patient_number}")
-            else:
-                logger.info(f"Successfully retrieved {len(result)} rows for patient name {patient_name}")
-            
-            return result
-                
-        except asyncpg.PostgresError as e:
-            logger.error(f"PostgreSQL error: {e}")
+    Returns:
+        Dictionary with appointments data, or None if error occurs
+    """
+    if not patient_name and not patient_id:
+        logger.error("At least one of patient_name or patient_id must be provided")
+        return None
+
+    try:
+        # Get connection from lifespan context
+        conn = ctx.request_context.lifespan_context.get("conn")
+
+        if conn is None:
+            logger.error("Database connection or cursor is not available")
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error retrieving data for selected patient: {e}")
-            return None
+
+        if patient_id:
+            query = """
+            SELECT t2.patient_name,
+                t2.patient_address,
+                t2.patient_phonenumber,
+                t1.appointment_date,
+                t1.start_hour,
+                t1.end_hour,
+                t3.appointment_type,
+                t3.hourly_rate
+            FROM agenda as t1
+            LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+            LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
+            WHERE t1.patient_id = $1
+            """
+            params = [patient_id]
+            if limit:
+                query += " LIMIT $2"
+                params.append(limit)
+            rows = await conn.fetch(query, *params)
+        else:
+            query = """
+            SELECT t2.patient_name,
+                t2.patient_address,
+                t2.patient_phonenumber,
+                t1.appointment_date,
+                t1.start_hour,
+                t1.end_hour,
+                t3.appointment_type,
+                t3.hourly_rate
+            FROM agenda as t1
+            LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+            LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
+            WHERE t2.name ILIKE $1
+            """
+            params = [patient_name]
+            if limit:
+                query += " LIMIT $2"
+                params.append(limit)
+            rows = await conn.fetch(query, *params)
+
+        appointments = [dict(row) for row in rows]
+
+        result = {
+            "status": "success",
+            "count": len(appointments),
+            "patient_name": patient_name,
+            "patient_id": patient_id,
+            "appointments": appointments
+        }
+
+        logger.info(
+            f"Successfully retrieved {len(appointments)} rows for "
+            f"{'patient number ' + patient_id if patient_id else 'patient name ' + str(patient_name)}"
+        )
+
+        return result
+
+    except asyncpg.PostgresError as e:
+        logger.error(f"PostgreSQL error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving data for selected patient: {e}")
+        return None
 
 
 # retrieve data and filter by appointment_type
 @mcp.tool()
-async def retrieve_data_appointmentType(ctx: Context,
-                                appointment_type: Optional[str] = None,
-                                appointment_number: Optional[str] = None,
-                                limit: Optional[str] = None) -> Union[List[Dict[str, Any]], None]:
+async def retrieve_data_appointmentType(
+    ctx: Context,
+    appointment_type: Optional[str] = None,
+    appointment_id: Optional[str] = None,
+    limit: Optional[int] = None
+) -> Union[Dict[str, Any], None]:
     """
-    Retrieve agenda data filtered by patient.
-    
-    Args:
-        appointment_type: type of the appointment (column name in appointment_types table)
-        appointment_number: number of the appointment type(column appointment_number in appointment_types table and column appointment_type in agenda table)
-    
-    Returns:
-        List of dictionaries representing rows, or None if error occurs
-    """
-    if not appointment_type and not appointment_number:
-        logger.error("At least one of appointment_type or appointment_number must be provided")
-        return None
-    else:
-        try:
-            # Get connection from lifespan context
-            conn = ctx.request_context.lifespan_context.get("conn")
-            
-            if conn is None:
-                logger.error("Database connection is not available")
-                return None
+    Retrieve agenda data filtered by appointment type.
 
-            if appointment_number:
-                query = """
-                SELECT t2.name as patient_name,
-                    t2.address,
-                    t2.phonenumber,
-                    t1.appointment_date,
-                    t1.start_hour,
-                    t1.end_hour,
-                    t3.name as type_appointment,
-                    t3.hourly_rate
-                FROM agenda as t1
-                LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-                LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
-                WHERE t1.appointment_type = $1
-                """
-                if limit:
-                    query += " LIMIT $2"
-                    rows = await conn.fetch(query, appointment_number, limit)
-                else:
-                    rows = await conn.fetch(query, appointment_number)
-            else:
-                query = """
-                SELECT t2.name as patient_name,
-                    t2.address,
-                    t2.phonenumber,
-                    t1.appointment_date,
-                    t1.start_hour,
-                    t1.end_hour,
-                    t3.name as type_appointment,
-                    t3.hourly_rate
-                FROM agenda as t1
-                LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-                LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
-                WHERE t3.name ILIKE $1
-                """
-                if limit:
-                    query += " LIMIT $2"
-                    rows = await conn.fetch(query, appointment_type, limit)
-                else:
-                    rows = await conn.fetch(query, appointment_type)
-            
-            appointments = [dict(row) for row in rows]
-        
-            result = {
-                "status": "success",
-                "count": len(appointments),
-                "appointment_type": appointment_type,
-                "appointment_number": appointment_number,
-                "appointments": appointments
-            }
-            
-            if appointment_number:
-                logger.info(f"Successfully retrieved {len(result)} rows for appointment number {appointment_number}")
-            else:
-                logger.info(f"Successfully retrieved {len(result)} rows for appointment type {appointment_type}")
-            
-            return result
-                
-        except asyncpg.PostgresError as e:
-            logger.error(f"PostgreSQL error: {e}")
+    Args:
+        appointment_type: Name of the appointment type (column name in appointment_types table)
+        appointment_id: ID of the appointment type (column appointment_id in appointment_types table and agenda table)
+        limit: Optional limit for number of rows
+
+    Returns:
+        Dictionary with appointments data, or None if error occurs
+    """
+    if not appointment_type and not appointment_id:
+        logger.error("At least one of appointment_type or appointment_id must be provided")
+        return None
+
+    try:
+        # Get connection from lifespan context
+        conn = ctx.request_context.lifespan_context.get("conn")
+
+        if conn is None:
+            logger.error("Database connection is not available")
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error retrieving data for selected patient: {e}")
-            return None
+
+        if appointment_id:
+            query = """
+            SELECT t2.patient_name,
+                t2.patient_address,
+                t2.patient_phonenumber,
+                t1.appointment_date,
+                t1.start_hour,
+                t1.end_hour,
+                t3.appointment_type,
+                t3.hourly_rate
+            FROM agenda as t1
+            LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+            LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
+            WHERE t1.appointment_id = $1
+            """
+            params = [int(appointment_id)]
+            if limit:
+                query += " LIMIT $2"
+                params.append(limit)
+            rows = await conn.fetch(query, *params)
+        else:
+            query = """
+            SELECT t2.patient_name,
+                t2.patient_address,
+                t2.patient_phonenumber,
+                t1.appointment_date,
+                t1.start_hour,
+                t1.end_hour,
+                t3.appointment_type,
+                t3.hourly_rate
+            FROM agenda as t1
+            LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+            LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
+            WHERE t3.appointment_type ILIKE $1
+            """
+            params = [appointment_type]
+            if limit:
+                query += " LIMIT $2"
+                params.append(limit)
+            rows = await conn.fetch(query, *params)
+
+        appointments = [dict(row) for row in rows]
+
+        result = {
+            "status": "success",
+            "count": len(appointments),
+            "appointment_type": appointment_type,
+            "appointment_id": appointment_id,
+            "appointments": appointments
+        }
+
+        if appointment_id:
+            logger.info(f"Successfully retrieved {len(appointments)} rows for appointment ID {appointment_id}")
+        else:
+            logger.info(f"Successfully retrieved {len(appointments)} rows for appointment type {appointment_type}")
+
+        return result
+
+    except asyncpg.PostgresError as e:
+        logger.error(f"PostgreSQL error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving data for selected appointment type: {e}")
+        return None
 
 
 # Get info by id
@@ -344,27 +373,26 @@ async def get_agenda_by_id(ctx: Context, id: int) -> Dict[str, Any] | None:
     """
     try:
         # Get connection from lifespan context
-        conn = ctx.request_context.lifespan_context["conn"]
-        
+        conn = ctx.request_context.lifespan_context.get("conn")
+
         if conn is None:
             logger.error("Database connection is not available")
             return None
         
         query = """
-        SELECT t2.name as patient_name,
-            t2.address,
-            t2.phonenumber,
+        SELECT t2.patient_name,
+            t2.patient_address,
+            t2.patient_phonenumber,
             t1.appointment_date,
             t1.start_hour,
             t1.end_hour,
-            t3.name as type_appointment,
+            t3.appointment_type,
             t3.hourly_rate
         FROM agenda as t1
-        LEFT JOIN patients as t2 ON t1.patient_number = t2.patient_number
-        LEFT JOIN appointment_types as t3 ON t1.appointment_type = t3.appointment_number
+        LEFT JOIN patients as t2 ON t1.patient_id = t2.id
+        LEFT JOIN appointment_types as t3 ON t1.appointment_id = t3.id
         WHERE t1.id = $1
         """
-        
         row = await conn.fetchrow(query, id)
         
         if row is None:
@@ -375,7 +403,7 @@ async def get_agenda_by_id(ctx: Context, id: int) -> Dict[str, Any] | None:
         
         logger.info(f"Successfully retrieved appointment with ID {id}")
         return result
-            
+
     except asyncpg.PostgresError as e:
         logger.error(f"PostgreSQL error: {e}")
         return None
@@ -384,7 +412,10 @@ async def get_agenda_by_id(ctx: Context, id: int) -> Dict[str, Any] | None:
         return None
 
 @mcp.tool()
-async def get_week_summary(ctx: Context, date: Optional[str] = None, week_number: Optional[int] = None, year: Optional[int] = None) -> Dict[str, Any] | None:
+async def get_week_summary(ctx: Context,
+                           date: Optional[str] = None,
+                           week_number: Optional[int] = None,
+                           year: Optional[int] = None) -> Dict[str, Any] | None:
     """
     Get a summary of appointments for a specific week including a Gantt chart visualization.
     
@@ -397,8 +428,8 @@ async def get_week_summary(ctx: Context, date: Optional[str] = None, week_number
         Dictionary with weekly summary and Gantt chart data or None if error occurs
     """
     try:
-        conn = ctx.request_context.lifespan_context["conn"]
-        
+        conn = ctx.request_context.lifespan_context.get("conn")
+
         if conn is None:
             logger.error("Database connection is not available")
             return None
@@ -429,18 +460,19 @@ async def get_week_summary(ctx: Context, date: Optional[str] = None, week_number
         # Get appointments for the week
         query = """
         SELECT 
-            t2.name as patient_name,
+            t2.patient_name,
             t1.appointment_date,
             t1.start_hour,
             t1.end_hour,
-            t3.name as type_appointment
+            t3.appointment_type
         FROM agenda t1
-        LEFT JOIN patients t2 ON t1.patient_number = t2.patient_number
-        LEFT JOIN appointment_types t3 ON t1.appointment_type = t3.appointment_number
+        LEFT JOIN patients t2 ON t1.patient_id = t2.id
+        LEFT JOIN appointment_types t3 ON t1.appointment_id = t3.id
         WHERE t1.appointment_date BETWEEN $1 AND $2
         ORDER BY t1.appointment_date, t1.start_hour
         """
-        rows = await conn.fetch(query, week_start, week_end)
+        params = [week_start, week_end]
+        rows = await conn.fetch(query, *params)
         appointments = [dict(row) for row in rows]
 
         # Calculate summary statistics
@@ -448,7 +480,7 @@ async def get_week_summary(ctx: Context, date: Optional[str] = None, week_number
         unique_patients = len(set(app['patient_name'] for app in appointments))
         appointment_types = {}
         for app in appointments:
-            appointment_types[app['type_appointment']] = appointment_types.get(app['type_appointment'], 0) + 1
+            appointment_types[app['appointment_type']] = appointment_types.get(app['appointment_type'], 0) + 1
 
         # Create daily appointment counts
         daily_counts = {}
@@ -483,137 +515,6 @@ def appointments_resume(date: str) -> str:
     """Create a summary report prompt for appointments."""
     return f"""You are an appointments manager. Give me a resume of appointments for this date: {date}?"""
 
-# Define tools for the MCP server: retrieve all data
-# @mcp.tool()
-# async def retrieve_all_data(
-#     ctx: Context,
-#     table_name: str="agenda",
-#     columns: Optional[List[str]] = None
-# ) -> List[Dict[str, Any]] | None:
-#     """
-#     Retrieve all data from the medical agenda (PostgreSQL table) with proper error handling.
-    
-#     Args:
-#         table_name: Name of the table to query
-#         columns: Optional list of specific columns to retrieve. If None, retrieves all columns.
-    
-#     Returns:
-#         List of dictionaries representing rows, or None if error occurs
-#     """
-#     try:
-#         # Get connection from lifespan context
-#         conn = ctx.request_context.lifespan_context["conn"]
-        
-#         if conn is None:
-#             logger.error("Database connection is not available")
-#             return None
-        
-#         # Build query
-#         if columns:
-#             # Sanitize column names to prevent SQL injection
-#             sanitized_columns = [f'"{col}"' for col in columns]
-#             columns_str = ", ".join(sanitized_columns)
-#             if table_name == 'agenda':
-#                 query = f'SELECT {columns_str} FROM "{table_name}" as s1 left join "patients" as s2 on s1.patient_number=s2.patient_number left join appointment_types as s3 on s1.appointment_type=s3.appointment_number'
-#             else:
-#                 query = f'SELECT {columns_str} FROM "{table_name}"'
-#         else:
-#             query = f'SELECT * FROM "{table_name}"'
-        
-#         # Execute query
-#         rows = await conn.fetch(query)
-        
-#         # Convert to list of dictionaries
-#         result = [dict(row) for row in rows]
-        
-#         logger.info(f"Successfully retrieved {len(result)} rows from {table_name}")
-#         return result
-            
-#     except asyncpg.PostgresError as e:
-#         logger.error(f"PostgreSQL error: {e}")
-#         return None
-#     except Exception as e:
-#         logger.error(f"Unexpected error retrieving data from {table_name}: {e}")
-#         return None
-
-
-
-# Define tools for the MCP server: retrieve data with conditions
-# @mcp.tool()
-# async def retrieve_data_with_conditions(
-#     table_name: str,
-#     ctx: Context,
-#     where_clause: Optional[str] = None,
-#     order_by: Optional[str] = None,
-#     limit: Optional[int] = None,
-#     columns: Optional[List[str]] = None
-# ) -> List[Dict[str, Any]] | None:
-#     """
-#     Retrieve data from PostgreSQL table with optional conditions.
-    
-#     Args:
-#         table_name: Name of the table to query
-#         where_clause: Optional WHERE clause (without the WHERE keyword)
-#         order_by: Optional ORDER BY clause (without the ORDER BY keywords)
-#         limit: Optional LIMIT for number of rows
-#         columns: Optional list of specific columns to retrieve
-    
-#     Returns:
-#         List of dictionaries representing rows, or None if error occurs
-#     """
-#     try:
-#         # Get connection from lifespan context
-#         conn = ctx.request_context.lifespan_context["conn"]
-        
-#         if conn is None:
-#             logger.error("Database connection is not available")
-#             return None
-        
-#         # Validate table name
-#         table_exists = await conn.fetchval(
-#             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
-#             table_name
-#         )
-#         if not table_exists:
-#             logger.error(f"Table '{table_name}' does not exist")
-#             return None
-        
-#         # Build query
-#         if columns:
-#             sanitized_columns = [f'"{col}"' for col in columns]
-#             columns_str = ", ".join(sanitized_columns)
-#             if table_name=='agenda':
-#                 query = f'SELECT {columns_str} FROM "{table_name}"  as s1 left join "patients" as s2 on s1.patient_number=s2.patient_number left join appointment_types as s3 on s1.appointment_type=s3.appointment_number'
-#             else:
-#                 query = f'SELECT {columns_str} FROM "{table_name}"'
-#         else:
-#             query = f'SELECT * FROM "{table_name}"'
-        
-#         # Add WHERE clause if provided
-#         if where_clause:
-#             query += f" WHERE {where_clause}"
-        
-#         # Add ORDER BY if provided
-#         if order_by:
-#             query += f" ORDER BY {order_by}"
-        
-#         # Add LIMIT if provided
-#         if limit:
-#             query += f" LIMIT {limit}"
-        
-#         # Execute query
-#         rows = await conn.fetch(query)
-#         result = [dict(row) for row in rows]
-        
-#         logger.info(f"Successfully retrieved {len(result)} rows from {table_name}")
-#         return result
-            
-#     except asyncpg.PostgresError as e:
-#         logger.error(f"PostgreSQL error: {e}")
-#         return None
-#     except Exception as e:
-#         logger.error(f"Unexpected error: {e}")
-#         return None
 
 
 # Define tools for the MCP server: create appointment
@@ -646,37 +547,38 @@ async def create_appointment(
     try:
         logger.info("Attempting to create appointment")
         conn = ctx.request_context.lifespan_context["conn"]
+        cursor = ctx.request_context.lifespan_context.get("cursor")
 
-        if conn is None:
-            logger.error("Database connection is not available")
+        if conn is None or cursor is None:
+            logger.error("Database connection or cursor is not available")
             return None
 
         async with conn.transaction():
             logger.info(f"Checking if patient '{patient_name}' exists...")
-            patient = await conn.fetchrow(
-                'SELECT patient_number FROM patients WHERE name = $1',
-                patient_name
-            )
+            query = """SELECT patient_number FROM patients WHERE name = %s"""
+            params = (patient_name,)
+            await cursor.execute(query, params)
+            patient = await cursor.fetchone()
 
             if not patient:
                 logger.info(f"Patient '{patient_name}' not found. Creating new patient...")
-                last_patient_number = await conn.fetchval(
+                last_patient_number = await cursor.fetchval(
                     'SELECT patient_number FROM patients order by patient_number desc limit 1'
                 )
                 if last_patient_number is None:
                     patient_number = "P001"
                 else:
                     patient_number = f"P{int(last_patient_number[1:]) + 1:03d}"
-                patient_number = await conn.fetchval(
+                patient_number = await cursor.fetchval(
                     'INSERT INTO patients (patient_number, name, address, phonenumber) VALUES ($1, $2, $3, $4) RETURNING patient_number',
                     patient_number, patient_name, patient_address, patient_phone
                 )
                 logger.info(f"Created new patient with number: {patient_number}")
-                newpatient = True
+
             else:
                 patient_number = patient['patient_number']
                 logger.info(f"Found existing patient with number: {patient_number}")
-                newpatient = False
+
 
             logger.info(f"Checking if appointment type '{appointment_type}' exists...")
             appointment_type_record = await conn.fetchrow(
@@ -686,7 +588,7 @@ async def create_appointment(
 
             if not appointment_type_record:
                 logger.info(f"Appointment type '{appointment_type}' not found. Creating new type...")
-                appointment_number = await conn.fetchval(
+                appointment_number = await cursor.fetchval(
                     'INSERT INTO appointment_types (name) VALUES ($1) RETURNING appointment_number',
                     appointment_type
                 )
@@ -722,7 +624,7 @@ async def create_appointment(
             logger.info("Appointment successfully created")
             return dict(appointment)
 
-    except asyncpg.PostgresError as e:
+    except psycopg2.Error as e:
         logger.error(f"PostgreSQL error: {e}")
         return None
     except Exception as e:
@@ -741,19 +643,20 @@ async def get_agenda_summary(ctx: Context) -> Dict[str, Any] | None:
     """
     try:
         conn = ctx.request_context.lifespan_context["conn"]
-        
-        if conn is None:
-            logger.error("Database connection is not available")
+        cursor = ctx.request_context.lifespan_context.get("cursor")
+
+        if conn is None or cursor is None:
+            logger.error("Database connection or cursor is not available")
             return None
         
         # Get total appointments
-        total_appointments = await conn.fetchval('SELECT COUNT(*) FROM agenda')
-        
+        total_appointments = await cursor.fetchval('SELECT COUNT(*) FROM agenda')
+
         # Get total patients
-        total_patients = await conn.fetchval('SELECT COUNT(*) FROM patients')
+        total_patients = await cursor.fetchval('SELECT COUNT(*) FROM patients')
         
         # Get daily average (last 30 days)
-        daily_avg = await conn.fetchval('''
+        daily_avg = await cursor.fetchval('''
             SELECT ROUND(AVG(count), 2) FROM (
                 SELECT DATE(appointment_date), COUNT(*) as count 
                 FROM agenda 
@@ -763,7 +666,7 @@ async def get_agenda_summary(ctx: Context) -> Dict[str, Any] | None:
         ''')
         
         # Get weekly average (last 12 weeks)
-        weekly_avg = await conn.fetchval('''
+        weekly_avg = await cursor.fetchval('''
             SELECT ROUND(AVG(count), 2) FROM (
                 SELECT DATE_TRUNC('week', appointment_date), COUNT(*) as count 
                 FROM agenda 
@@ -773,7 +676,7 @@ async def get_agenda_summary(ctx: Context) -> Dict[str, Any] | None:
         ''')
         
         # Get monthly average (last 12 months)
-        monthly_avg = await conn.fetchval('''
+        monthly_avg = await cursor.fetchval('''
             SELECT ROUND(AVG(count), 2) FROM (
                 SELECT DATE_TRUNC('month', appointment_date), COUNT(*) as count 
                 FROM agenda 
@@ -791,12 +694,13 @@ async def get_agenda_summary(ctx: Context) -> Dict[str, Any] | None:
             "monthly_average": monthly_avg or 0
         }
             
-    except asyncpg.PostgresError as e:
+    except psycopg2.Error as e:
         logger.error(f"PostgreSQL error: {e}")
         return None
     except Exception as e:
         logger.error(f"Unexpected error getting agenda summary: {e}")
         return None
+
 
 if __name__ == "__main__":
     # Initialize and run the server
